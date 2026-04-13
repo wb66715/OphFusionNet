@@ -101,7 +101,7 @@ class BasicConv2d(nn.Module):
 
 
 class UMF_GTSS(nn.Module):
-    def __init__(self, in_channel1, in_channel2, out_channel):
+    def __init__(self, in_channel1, in_channel2, out_channel,group_init=8):
         super(UMF_GTSS, self).__init__()
 
         self.act_fn = nn.ReLU()
@@ -129,6 +129,10 @@ class UMF_GTSS(nn.Module):
             nn.BatchNorm2d(out_channel),
             self.act_fn
         )
+
+        # 可学习的组数参数，用 sigmoid 限制在 1 到 out_channel 之间
+        self.group_param = nn.Parameter(torch.tensor(float(group_init), requires_grad=True))
+        self.out_channel = out_channel
 
     def forward(self, x1, x2):
         x_rec1 = self.layer_rec1(x1)
@@ -167,13 +171,20 @@ class UMF_GTSS(nn.Module):
 
         out = self.layer_cat(torch.cat((x_max_att, x_mul_att), dim=1))
 
+        # 将 group_param 映射到有效的组数
+        group = torch.clamp(self.group_param.sigmoid() * self.out_channel, min=1).int().item()
         b, c, h, w = out.shape
-        out = out.reshape(b, 8, -1, h, w)  # 按照 groups 将通道维度进行重塑
-        out = out.permute(0, 2, 1, 3, 4)  # 调整维度顺序，使通道组进行交换
-        out = out.reshape(b, -1, h, w)
+        # 确保可以整除
+        group = max(1, min(group, c))
+        if c % group != 0:
+            group = 1  # fallback
+
+        # 通道重排（channel shuffle）
+        out = out.reshape(b, group, c // group, h, w)
+        out = out.permute(0, 2, 1, 3, 4)
+        out = out.reshape(b, c, h, w)
 
         return out
-
 
 
 
@@ -306,7 +317,7 @@ class WindowAttention_sparse(nn.Module):
 
 class WindowAttention_sparse(nn.Module):
     def __init__(self, dim, win_size, num_heads, token_projection='linear', qkv_bias=True, qk_scale=None, attn_drop=0.,
-                 proj_drop=0.):
+                 proj_drop=0.2):
 
         super().__init__()
         self.dim = dim
@@ -398,7 +409,7 @@ class MSFF_SSA(nn.Module):
         self.dilated_conv3 = nn.Conv2d(in_channels_stage3, out_channels//4, kernel_size=3, padding=4, dilation=4)
         self.dilated_conv4 = nn.Conv2d(in_channels_stage4, out_channels//4, kernel_size=3, padding=8, dilation=8)
 
-        self.ASSA = WindowAttention_sparse(dim=out_channels, win_size=(7, 7), num_heads=8)
+        self.ASSA = WindowAttention_sparse(dim=out_channels, win_size=(7, 7), num_heads=16)
         # 门控机制
         self.gate_conv = nn.Conv2d(out_channels, out_channels, kernel_size=1)
 
